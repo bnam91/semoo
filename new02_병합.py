@@ -38,6 +38,11 @@ if '후처리' in 워크북.sheetnames:
     워크북.remove(워크북['후처리'])
 후처리시트 = 워크북.create_sheet('후처리')
 
+# 동명이인 시트 생성 (이미 있으면 삭제 후 생성)
+if '동명이인' in 워크북.sheetnames:
+    워크북.remove(워크북['동명이인'])
+동명이인시트 = 워크북.create_sheet('동명이인')
+
 # 오렌지색 채우기 스타일 정의
 오렌지색 = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
 # 파란색 채우기 스타일 정의
@@ -47,15 +52,38 @@ if '후처리' in 워크북.sheetnames:
 헤더행 = next(원본시트.rows)
 for 셀 in 헤더행:
     후처리시트.cell(row=1, column=셀.column, value=셀.value)
+    동명이인시트.cell(row=1, column=셀.column, value=셀.value)
 
 # 동일인 데이터 그룹화 (이름과 주민번호가 같은 경우)
 사람별_데이터 = defaultdict(lambda: {'A열값들': [], 'G열합계': 0, '행데이터들': [], 'H열값들': []})
 
+# 이름에서 괄호 처리 함수
+def 이름_정규화(이름):
+    """이름에서 괄호를 제거하고 괄호 안의 이름도 고려하여 정규화"""
+    if not 이름 or not isinstance(이름, str):
+        return ""
+    
+    # 전체 이름에서 공백 제거
+    이름 = 이름.replace(' ', '')
+    
+    # 괄호가 있는 경우
+    if '(' in 이름 and ')' in 이름:
+        # 괄호 밖 이름과 괄호 안 이름 모두 추출
+        괄호밖_이름 = 이름.split('(')[0].strip()
+        괄호안_이름 = 이름.split('(')[1].split(')')[0].strip()
+        return [괄호밖_이름, 괄호안_이름]
+    else:
+        # 괄호가 없는 경우
+        return [이름.strip()]
+
 # 첫 번째 행은 이미 처리했으므로 두 번째 행부터 시작
 for 행 in list(원본시트.rows)[1:]:
     # B열(이름)과 F열(주민번호) 값 가져오기
-    이름 = 행[1].value if len(행) > 1 else ""
+    원본_이름 = 행[1].value if len(행) > 1 else ""
     주민번호 = 행[5].value if len(행) > 5 else ""
+    
+    # 이름 정규화
+    정규화된_이름들 = 이름_정규화(원본_이름)
     
     # A열 값과 G열 값, H열 값 가져오기
     A열값 = 행[0].value if len(행) > 0 else ""
@@ -74,14 +102,15 @@ for 행 in list(원본시트.rows)[1:]:
         except (ValueError, TypeError):
             G열값 = 0
     
-    # 키 생성 (이름과 주민번호 조합)
-    키 = (이름, 주민번호)
-    
-    # 데이터 누적
-    사람별_데이터[키]['A열값들'].append(A열값)
-    사람별_데이터[키]['G열합계'] += G열값
-    사람별_데이터[키]['행데이터들'].append(행)
-    사람별_데이터[키]['H열값들'].append(H열값)
+    # 정규화된 이름들로 키 생성 (주민번호와 함께)
+    for 정규화된_이름 in 정규화된_이름들:
+        키 = (정규화된_이름, 주민번호)
+        
+        # 데이터 누적
+        사람별_데이터[키]['A열값들'].append(A열값)
+        사람별_데이터[키]['G열합계'] += G열값
+        사람별_데이터[키]['행데이터들'].append(행)
+        사람별_데이터[키]['H열값들'].append(H열값)
 
 # 병합된 데이터를 후처리 시트에 쓰기
 새행번호 = 2  # 1행은 헤더
@@ -148,11 +177,43 @@ for 키, 데이터 in 사람별_데이터.items():
     
     새행번호 += 1
 
+# 동명이인 찾기 및 저장
+print("동명이인 찾는 중...")
+이름별_주민번호들 = defaultdict(set)  # 이름별로 주민번호들을 저장
+
+# 후처리 시트에서 이름별 주민번호 수집
+for 행 in list(후처리시트.rows)[1:]:  # 헤더 제외
+    if len(행) > 1 and len(행) > 5:  # B열과 F열이 있는지 확인
+        이름 = 행[1].value if 행[1].value else ""
+        주민번호 = 행[5].value if 행[5].value else ""
+        
+        if 이름 and 주민번호:
+            이름별_주민번호들[이름].add(str(주민번호))
+
+# 동명이인 찾기 (같은 이름에 다른 주민번호가 2개 이상인 경우)
+동명이인_이름들 = {이름: 주민번호들 for 이름, 주민번호들 in 이름별_주민번호들.items() if len(주민번호들) > 1}
+
+# 동명이인 데이터를 동명이인 시트에 저장
+동명이인_행번호 = 2  # 1행은 헤더
+for 이름, 주민번호들 in 동명이인_이름들.items():
+    # 해당 이름의 모든 행을 후처리 시트에서 찾아서 동명이인 시트에 복사
+    for 행 in list(후처리시트.rows)[1:]:  # 헤더 제외
+        if len(행) > 1 and len(행) > 5:
+            행_이름 = 행[1].value if 행[1].value else ""
+            행_주민번호 = str(행[5].value) if 행[5].value else ""
+            
+            if 행_이름 == 이름 and 행_주민번호 in 주민번호들:
+                # 행 데이터를 동명이인 시트에 복사
+                for 열_인덱스, 셀 in enumerate(행):
+                    동명이인시트.cell(row=동명이인_행번호, column=열_인덱스 + 1, value=셀.value)
+                동명이인_행번호 += 1
+
 # 열 너비 복사 (가능한 경우)
 for 열 in range(1, 원본시트.max_column + 1):
     if 원본시트.column_dimensions[openpyxl.utils.get_column_letter(열)].width is not None:
         후처리시트.column_dimensions[openpyxl.utils.get_column_letter(열)].width = 원본시트.column_dimensions[openpyxl.utils.get_column_letter(열)].width
+        동명이인시트.column_dimensions[openpyxl.utils.get_column_letter(열)].width = 원본시트.column_dimensions[openpyxl.utils.get_column_letter(열)].width
 
 # 파일 저장
 워크북.save(파일경로)
-print("작업이 완료되었습니다.")
+print(f"작업이 완료되었습니다. 동명이인 {len(동명이인_이름들)}명 발견: {list(동명이인_이름들.keys())}")

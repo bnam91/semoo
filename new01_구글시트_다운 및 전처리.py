@@ -31,6 +31,11 @@ def main():
     # 각 시트 순회
     for sheet in sheets:
         sheet_title = sheet.get('properties', {}).get('title', '')
+        
+        # '(가라)'가 포함된 시트는 건너뛰기
+        if '(가라)' in sheet_title:
+            continue
+        
         print(f'{sheet_title} 시트 처리 중...')
         
         # 시트 데이터 범위 설정 (9행부터 모든 데이터)
