@@ -21,32 +21,30 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 import webbrowser
-from google_sheets_config import TRANSACTION_PREPROCESSING_FOLDER_ID
 
 def main():
-    # 사용자로부터 년월 입력 받기 (예: 2512)
-    user_input = input("년월을 입력하세요 (예: 2512): ")
-    
     # 구글 인증 자격 증명 가져오기
     creds = get_credentials()
     
-    # 구글 시트 API 및 드라이브 API 클라이언트 생성
+    # 구글 시트 API 클라이언트 생성
     sheets_service = build('sheets', 'v4', credentials=creds)
-    drive_service = build('drive', 'v3', credentials=creds)
     
     # 스프레드시트 ID (URL에서 추출)
     SPREADSHEET_ID = '1Qk_Jlchp0RczrWPsDfNqMMtRuGmJpd3wXD6hpxbxHuk'
     
     try:
-        # 입력받은 년월을 연도와 월로 분리
-        year_str = '20' + user_input[:2]  # 25 -> 2025
-        month_str = user_input[2:]  # 12
-        prev_year = int(year_str)
-        prev_month = int(month_str)
+        # 전월 계산 (예: 2025.11 -> 2510)
+        today = datetime.now()
+        if today.month == 1:
+            prev_month = 12
+            prev_year = today.year - 1
+        else:
+            prev_month = today.month - 1
+            prev_year = today.year
         
-        # 연월 형식 (예: 2512)
-        year_month = user_input
-        print(f"입력된 년월: {year_month} ({prev_year}년 {prev_month}월)")
+        # 연월 형식으로 변환 (예: 2510)
+        year_month = f"{str(prev_year)[2:]}{prev_month:02d}"
+        print(f"전월: {year_month}")
         
         # 스프레드시트의 모든 시트 정보 가져오기
         spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
@@ -114,96 +112,42 @@ def main():
         new_sheet_id = response.get('replies')[0].get('duplicateSheet').get('properties').get('sheetId')
         print(f"✅ 시트 복사 완료! 새 시트명: '{new_sheet_name}' (ID: {new_sheet_id})")
         
-        # 구글 드라이브에서 년월 폴더 찾기
-        print(f"\n'{year_month}' 폴더 찾는 중...")
-        query = f"'{TRANSACTION_PREPROCESSING_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and name='{year_month}' and trashed=false"
-        existing_folders = drive_service.files().list(q=query, fields='files(id, name)').execute()
+        # 로컬 폴더에서 '(전처리)'가 포함된 xls 파일 찾기
+        current_dir = Path('.')
+        data_files = []
+        for file_path in current_dir.glob('*(전처리)*.xls*'):
+            if file_path.is_file():
+                data_files.append(file_path)
         
-        if not existing_folders.get('files'):
-            print(f"❌ '{year_month}' 폴더를 찾을 수 없습니다.")
+        data_files.sort()
+        
+        if not data_files:
+            print("\n❌ '(전처리)'가 포함된 xls 파일을 찾을 수 없습니다.")
             return
         
-        date_folder_id = existing_folders['files'][0]['id']
-        print(f"✅ '{year_month}' 폴더를 찾았습니다.")
+        # 파일 리스트 출력
+        print(f"\n총 {len(data_files)}개의 데이터 파일을 찾았습니다:\n")
+        for idx, file_path in enumerate(data_files, 1):
+            print(f"{idx}. {file_path.name}")
         
-        # 폴더 안에 스프레드시트 목록 가져오기
-        print(f"\n폴더 안에 스프레드시트 목록 가져오는 중...")
-        spreadsheet_query = f"'{date_folder_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
-        existing_spreadsheets = drive_service.files().list(q=spreadsheet_query, fields='files(id, name)').execute()
-        
-        if not existing_spreadsheets.get('files'):
-            print(f"❌ 폴더 안에 스프레드시트가 없습니다.")
-            return
-        
-        # 스프레드시트 목록 출력
-        print("\n사용 가능한 스프레드시트 목록:")
-        spreadsheet_list = existing_spreadsheets['files']
-        for i, spreadsheet in enumerate(spreadsheet_list, 1):
-            print(f"{i}. {spreadsheet['name']}")
-        
-        # 사용자 입력 받기
+        # 사용자로부터 번호 입력 받기
         try:
-            choice = int(input("\n데이터 스프레드시트 번호를 선택하세요: "))
-            if not (1 <= choice <= len(spreadsheet_list)):
+            choice = int(input("\n데이터 파일 번호를 선택하세요: "))
+            if not (1 <= choice <= len(data_files)):
                 print("잘못된 번호입니다.")
                 return
             
-            selected_spreadsheet = spreadsheet_list[choice - 1]
-            selected_spreadsheet_id = selected_spreadsheet['id']
-            selected_spreadsheet_name = selected_spreadsheet['name']
-            print(f"\n선택된 스프레드시트: {selected_spreadsheet_name}")
+            selected_data_file = data_files[choice - 1]
+            print(f"\n선택된 데이터 파일: {selected_data_file.name}")
             
-            # 스프레드시트의 모든 시트 정보 가져오기
-            spreadsheet_info = sheets_service.spreadsheets().get(spreadsheetId=selected_spreadsheet_id).execute()
-            sheets = spreadsheet_info.get('sheets', [])
-            
-            # '후처리_구글시트_'가 포함된 시트 찾기
-            후처리_시트_이름 = None
-            후처리_시트들 = []
-            for sheet in sheets:
-                sheet_title = sheet.get('properties', {}).get('title', '')
-                if '후처리_구글시트' in sheet_title:
-                    후처리_시트들.append(sheet_title)
-            
-            if not 후처리_시트들:
-                print(f"❌ '후처리_구글시트'가 포함된 시트를 찾을 수 없습니다.")
+            # 데이터 파일에서 '후처리' 시트 읽기
+            print(f"\n데이터 파일 읽는 중...")
+            try:
+                df_data = pd.read_excel(selected_data_file, sheet_name='후처리')
+                print(f"✅ 데이터 읽기 완료: {len(df_data)}행")
+            except Exception as e:
+                print(f"❌ '후처리' 시트를 찾을 수 없습니다: {e}")
                 return
-            
-            # 여러 개인 경우 선택
-            if len(후처리_시트들) > 1:
-                print("\n'후처리_구글시트'가 포함된 시트 목록:")
-                for i, sheet_name in enumerate(후처리_시트들, 1):
-                    print(f"{i}. {sheet_name}")
-                
-                while True:
-                    try:
-                        sheet_choice = int(input("\n처리할 시트 번호를 입력하세요: "))
-                        if 1 <= sheet_choice <= len(후처리_시트들):
-                            후처리_시트_이름 = 후처리_시트들[sheet_choice - 1]
-                            break
-                        else:
-                            print("올바른 번호를 입력해주세요.")
-                    except ValueError:
-                        print("숫자를 입력해주세요.")
-            else:
-                후처리_시트_이름 = 후처리_시트들[0]
-                print(f"✅ '{후처리_시트_이름}' 시트를 사용합니다.")
-            
-            # 시트 데이터 읽기
-            print(f"\n'{후처리_시트_이름}' 시트 데이터 읽는 중...")
-            result = sheets_service.spreadsheets().values().get(
-                spreadsheetId=selected_spreadsheet_id,
-                range=f"{후처리_시트_이름}!A:Z"
-            ).execute()
-            
-            rows = result.get('values', [])
-            if not rows:
-                print(f"❌ '{후처리_시트_이름}' 시트에 데이터가 없습니다.")
-                return
-            
-            # 데이터프레임으로 변환 (첫 번째 행은 헤더)
-            df_data = pd.DataFrame(rows[1:], columns=rows[0] if rows else None)
-            print(f"✅ 데이터 읽기 완료: {len(df_data)}행")
             
             # 데이터를 스프레드시트에 입력
             print(f"\n스프레드시트에 데이터 입력 중...")
@@ -240,8 +184,8 @@ def main():
             start_row = 4
             values_to_update = []
             
-            # B열에 입력할 전월 형식 (예: 2025.10)
-            date_string = f"{prev_year}.{prev_month:02d}"
+            # B열에 입력할 전월 형식 (예: 2025-10)
+            date_string = f"{prev_year}-{prev_month:02d}"
             
             def convert_date_format(date_str):
                 """날짜 형식 변환: '251002' -> '2025.10.02'"""
@@ -277,7 +221,7 @@ def main():
                 # A열에 번호 입력 (1부터 시작)
                 row_values[0] = row_idx + 1
                 
-                # B열에 전월 입력 (예: 2025.10)
+                # B열에 전월 입력 (예: 2025-10)
                 row_values[1] = date_string
                 
                 # H열 (인덱스 7) → C열 (인덱스 2) - 날짜 형식 변환

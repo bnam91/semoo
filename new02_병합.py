@@ -1,34 +1,145 @@
+#!/usr/bin/env python3
+"""
+가상환경 자동 감지 및 활성화
+"""
+import sys
+import os
+from pathlib import Path
+
+# 현재 스크립트의 디렉토리
+SCRIPT_DIR = Path(__file__).parent.absolute()
+VENV_PYTHON = SCRIPT_DIR / 'venv' / 'bin' / 'python3'
+
+# 가상환경이 존재하고 현재 Python이 가상환경이 아닌 경우
+if VENV_PYTHON.exists() and 'venv' not in sys.executable:
+    # 가상환경의 Python으로 재실행
+    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON)] + sys.argv)
+
 import openpyxl
 from openpyxl.styles import PatternFill
 from collections import defaultdict
 import os
+import pandas as pd
+from googleapiclient.discovery import build
+from auth import get_credentials
+from google_sheets_config import TRANSACTION_PREPROCESSING_FOLDER_ID
 
-# 현재 폴더의 xlsx 파일 목록 가져오기
-xlsx_파일들 = [f for f in os.listdir('.') if f.endswith('.xlsx')]
+# 사용자로부터 년월 입력 받기 (예: 2512)
+user_input = input("년월을 입력하세요 (예: 2512): ")
 
-if not xlsx_파일들:
-    print("현재 폴더에 xlsx 파일이 없습니다.")
+# 구글 인증 자격 증명 가져오기
+print("구글 인증 중...")
+creds = get_credentials()
+
+# 구글 시트 API 및 드라이브 API 클라이언트 생성
+sheets_service = build('sheets', 'v4', credentials=creds)
+drive_service = build('drive', 'v3', credentials=creds)
+
+# 구글 드라이브에서 년월 폴더 찾기
+print(f"\n'{user_input}' 폴더 찾는 중...")
+query = f"'{TRANSACTION_PREPROCESSING_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and name='{user_input}' and trashed=false"
+existing_folders = drive_service.files().list(q=query, fields='files(id, name)').execute()
+
+if not existing_folders.get('files'):
+    print(f"❌ '{user_input}' 폴더를 찾을 수 없습니다.")
     exit()
 
-# 파일 목록 출력
-print("\n사용 가능한 엑셀 파일 목록:")
-for i, 파일명 in enumerate(xlsx_파일들, 1):
-    print(f"{i}. {파일명}")
+date_folder_id = existing_folders['files'][0]['id']
+print(f"✅ '{user_input}' 폴더를 찾았습니다.")
+
+# 폴더 안에 스프레드시트 목록 가져오기
+print(f"\n폴더 안에 스프레드시트 목록 가져오는 중...")
+spreadsheet_query = f"'{date_folder_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+existing_spreadsheets = drive_service.files().list(q=spreadsheet_query, fields='files(id, name)').execute()
+
+if not existing_spreadsheets.get('files'):
+    print(f"❌ 폴더 안에 스프레드시트가 없습니다.")
+    exit()
+
+# 스프레드시트 목록 출력
+print("\n사용 가능한 스프레드시트 목록:")
+spreadsheet_list = existing_spreadsheets['files']
+for i, spreadsheet in enumerate(spreadsheet_list, 1):
+    print(f"{i}. {spreadsheet['name']}")
 
 # 사용자 입력 받기
 while True:
     try:
-        선택 = int(input("\n처리할 파일 번호를 입력하세요: "))
-        if 1 <= 선택 <= len(xlsx_파일들):
-            파일경로 = xlsx_파일들[선택-1]
+        선택 = int(input("\n처리할 스프레드시트 번호를 입력하세요: "))
+        if 1 <= 선택 <= len(spreadsheet_list):
+            target_spreadsheet = spreadsheet_list[선택-1]
+            target_spreadsheet_id = target_spreadsheet['id']
+            target_spreadsheet_name = target_spreadsheet['name']
             break
         else:
             print("올바른 번호를 입력해주세요.")
     except ValueError:
         print("숫자를 입력해주세요.")
 
+print(f"\n선택된 스프레드시트: {target_spreadsheet_name}")
+
+# 스프레드시트의 모든 시트 정보 가져오기
+spreadsheet_info = sheets_service.spreadsheets().get(spreadsheetId=target_spreadsheet_id).execute()
+sheets = spreadsheet_info.get('sheets', [])
+
+# '구글시트'가 포함된 시트 찾기
+원본시트_이름 = None
+구글시트_시트들 = []
+for sheet in sheets:
+    sheet_title = sheet.get('properties', {}).get('title', '')
+    if '구글시트' in sheet_title:
+        구글시트_시트들.append(sheet_title)
+
+if not 구글시트_시트들:
+    print(f"❌ '구글시트'가 포함된 시트를 찾을 수 없습니다.")
+    exit()
+
+# '구글시트'가 포함된 시트가 여러 개인 경우 선택
+if len(구글시트_시트들) > 1:
+    print("\n'구글시트'가 포함된 시트 목록:")
+    for i, sheet_name in enumerate(구글시트_시트들, 1):
+        print(f"{i}. {sheet_name}")
+    
+    while True:
+        try:
+            선택 = int(input("\n처리할 시트 번호를 입력하세요: "))
+            if 1 <= 선택 <= len(구글시트_시트들):
+                원본시트_이름 = 구글시트_시트들[선택-1]
+                break
+            else:
+                print("올바른 번호를 입력해주세요.")
+        except ValueError:
+            print("숫자를 입력해주세요.")
+else:
+    원본시트_이름 = 구글시트_시트들[0]
+    print(f"✅ '{원본시트_이름}' 시트를 사용합니다.")
+
+# 시트 데이터 가져오기
+print(f"\n'{원본시트_이름}' 시트 데이터 읽는 중...")
+result = sheets_service.spreadsheets().values().get(
+    spreadsheetId=target_spreadsheet_id,
+    range=f"{원본시트_이름}!A:Z"
+).execute()
+
+rows = result.get('values', [])
+if not rows:
+    print(f"❌ '{원본시트_이름}' 시트에 데이터가 없습니다.")
+    exit()
+
+# 데이터프레임으로 변환
+df = pd.DataFrame(rows)
+print(f"✅ {len(df)}행 데이터 읽기 완료")
+
+# 임시 엑셀 파일로 저장하여 openpyxl로 처리
+import tempfile
+temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
+temp_file_path = temp_file.name
+temp_file.close()
+
+df.to_excel(temp_file_path, sheet_name='25년3월데이터', index=False, header=False)
+
 # 엑셀 파일 열기
-워크북 = openpyxl.load_workbook(파일경로)
+워크북 = openpyxl.load_workbook(temp_file_path)
 
 # 원본 시트 가져오기
 원본시트 = 워크북['25년3월데이터']
@@ -48,11 +159,11 @@ if '동명이인' in 워크북.sheetnames:
 # 파란색 채우기 스타일 정의
 파란색 = PatternFill(start_color="0000FF", end_color="0000FF", fill_type="solid")
 
-# 헤더 행 복사
-헤더행 = next(원본시트.rows)
-for 셀 in 헤더행:
-    후처리시트.cell(row=1, column=셀.column, value=셀.value)
-    동명이인시트.cell(row=1, column=셀.column, value=셀.value)
+# 헤더 추가 (명시적으로 설정)
+헤더 = ['항목', '이름', '번호', '-', '계좌', '주민번호', '입금액', '상태']
+for i, 헤더값 in enumerate(헤더, 1):
+    후처리시트.cell(row=1, column=i, value=헤더값)
+    동명이인시트.cell(row=1, column=i, value=헤더값)
 
 # 동일인 데이터 그룹화 (이름과 주민번호가 같은 경우)
 사람별_데이터 = defaultdict(lambda: {'A열값들': [], 'G열합계': 0, '행데이터들': [], 'H열값들': []})
@@ -114,6 +225,7 @@ for 행 in list(원본시트.rows)[1:]:
 
 # 병합된 데이터를 후처리 시트에 쓰기
 새행번호 = 2  # 1행은 헤더
+색상정보 = []  # (행번호, 색상타입) 저장
 
 for 키, 데이터 in 사람별_데이터.items():
     이름, 주민번호 = 키
@@ -167,13 +279,15 @@ for 키, 데이터 in 사람별_데이터.items():
         if len(str(주민번호)) != 13:
             색상변경 = "오렌지"
     
-    # 조건에 따라 색상 변경
+    # 조건에 따라 색상 변경 (엑셀 파일에 적용)
     if 색상변경:
         for 열 in range(1, 원본시트.max_column + 1):
             if 색상변경 == "오렌지":
                 후처리시트.cell(row=새행번호, column=열).fill = 오렌지색
             elif 색상변경 == "파랑":
                 후처리시트.cell(row=새행번호, column=열).fill = 파란색
+        # 구글시트용 색상 정보 저장 (0-based 인덱스)
+        색상정보.append((새행번호 - 1, 색상변경))  # 새행번호는 1-based, 구글시트는 0-based
     
     새행번호 += 1
 
@@ -214,6 +328,166 @@ for 열 in range(1, 원본시트.max_column + 1):
         후처리시트.column_dimensions[openpyxl.utils.get_column_letter(열)].width = 원본시트.column_dimensions[openpyxl.utils.get_column_letter(열)].width
         동명이인시트.column_dimensions[openpyxl.utils.get_column_letter(열)].width = 원본시트.column_dimensions[openpyxl.utils.get_column_letter(열)].width
 
-# 파일 저장
-워크북.save(파일경로)
-print(f"작업이 완료되었습니다. 동명이인 {len(동명이인_이름들)}명 발견: {list(동명이인_이름들.keys())}")
+# 임시 파일에 저장
+워크북.save(temp_file_path)
+
+# 결과를 구글시트에 업로드
+print(f"\n구글시트에 결과 업로드 중...")
+
+# 후처리 시트 데이터 읽기
+후처리_df = pd.read_excel(temp_file_path, sheet_name='후처리')
+동명이인_df = pd.read_excel(temp_file_path, sheet_name='동명이인')
+
+# 기존 시트 목록 확인 (다시 가져오기)
+spreadsheet_info = sheets_service.spreadsheets().get(spreadsheetId=target_spreadsheet_id).execute()
+sheets = spreadsheet_info.get('sheets', [])
+existing_sheet_names = {sheet.get('properties', {}).get('title', '') for sheet in sheets}
+
+# 원본 시트명에서 타임스탬프 추출 (예: 전처리_구글시트_20260107_101058 -> 20260107_101058)
+from datetime import datetime
+import re
+
+타임스탬프 = None
+match = re.search(r'(\d{8}_\d{6})', 원본시트_이름)
+if match:
+    타임스탬프 = match.group(1)
+else:
+    # 타임스탬프가 없으면 현재 시간 사용
+    타임스탬프 = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+후처리_시트명 = f'후처리_구글시트_{타임스탬프}'
+동명이인_시트명 = f'동명이인_구글시트_{타임스탬프}'
+
+# 시트명이 이미 존재하는지 확인하고 고유한 이름 생성
+counter = 2
+while 후처리_시트명 in existing_sheet_names:
+    후처리_시트명 = f'후처리_구글시트_{타임스탬프}_{counter}'
+    counter += 1
+
+counter = 2
+while 동명이인_시트명 in existing_sheet_names:
+    동명이인_시트명 = f'동명이인_구글시트_{타임스탬프}_{counter}'
+    counter += 1
+
+# 새 시트 추가
+add_sheet_request = {
+    'requests': [
+        {
+            'addSheet': {
+                'properties': {
+                    'title': 후처리_시트명
+                }
+            }
+        },
+        {
+            'addSheet': {
+                'properties': {
+                    'title': 동명이인_시트명
+                }
+            }
+        }
+    ]
+}
+sheets_service.spreadsheets().batchUpdate(
+    spreadsheetId=target_spreadsheet_id,
+    body=add_sheet_request
+).execute()
+
+# 후처리 시트 데이터 업로드 (헤더 포함)
+헤더 = ['항목', '이름', '번호', '-', '계좌', '주민번호', '입금액', '상태']
+후처리_values = 후처리_df.fillna('').astype(str).values.tolist()
+# 헤더를 첫 번째 행으로 추가
+후처리_values_with_header = [헤더] + 후처리_values
+sheets_service.spreadsheets().values().update(
+    spreadsheetId=target_spreadsheet_id,
+    range=f'{후처리_시트명}!A1',
+    valueInputOption='USER_ENTERED',
+    body={'values': 후처리_values_with_header}
+).execute()
+
+# 후처리 시트 ID 가져오기
+후처리_시트_id = None
+spreadsheet_info = sheets_service.spreadsheets().get(spreadsheetId=target_spreadsheet_id).execute()
+for sheet in spreadsheet_info.get('sheets', []):
+    if sheet.get('properties', {}).get('title') == 후처리_시트명:
+        후처리_시트_id = sheet.get('properties', {}).get('sheetId')
+        break
+
+# 색상 스타일 적용
+if 후처리_시트_id and 색상정보:
+    print(f"색상 스타일 적용 중...")
+    format_requests = []
+    
+    for 행번호_0based, 색상타입 in 색상정보:
+        # 행번호는 0-based 인덱스 (헤더는 0번째 행, 데이터는 1번째 행부터)
+        if 색상타입 == "오렌지":
+            # 오렌지색 배경 (RGB: 255, 165, 0)
+            format_requests.append({
+                'repeatCell': {
+                    'range': {
+                        'sheetId': 후처리_시트_id,
+                        'startRowIndex': 행번호_0based,
+                        'endRowIndex': 행번호_0based + 1,
+                        'startColumnIndex': 0,
+                        'endColumnIndex': len(헤더)  # 헤더 개수만큼
+                    },
+                    'cell': {
+                        'userEnteredFormat': {
+                            'backgroundColor': {
+                                'red': 1.0,
+                                'green': 0.647,
+                                'blue': 0.0
+                            }
+                        }
+                    },
+                    'fields': 'userEnteredFormat.backgroundColor'
+                }
+            })
+        elif 색상타입 == "파랑":
+            # 파란색 배경 (RGB: 0, 0, 255)
+            format_requests.append({
+                'repeatCell': {
+                    'range': {
+                        'sheetId': 후처리_시트_id,
+                        'startRowIndex': 행번호_0based,
+                        'endRowIndex': 행번호_0based + 1,
+                        'startColumnIndex': 0,
+                        'endColumnIndex': len(헤더)  # 헤더 개수만큼
+                    },
+                    'cell': {
+                        'userEnteredFormat': {
+                            'backgroundColor': {
+                                'red': 0.0,
+                                'green': 0.0,
+                                'blue': 1.0
+                            }
+                        }
+                    },
+                    'fields': 'userEnteredFormat.backgroundColor'
+                }
+            })
+    
+    if format_requests:
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=target_spreadsheet_id,
+            body={'requests': format_requests}
+        ).execute()
+        print(f"✅ 색상 스타일 적용 완료 ({len(색상정보)}개 행)")
+
+# 동명이인 시트 데이터 업로드
+동명이인_values = 동명이인_df.fillna('').astype(str).values.tolist()
+if 동명이인_values:
+    sheets_service.spreadsheets().values().update(
+        spreadsheetId=target_spreadsheet_id,
+        range=f'{동명이인_시트명}!A1',
+        valueInputOption='USER_ENTERED',
+        body={'values': 동명이인_values}
+    ).execute()
+
+# 임시 파일 삭제
+os.unlink(temp_file_path)
+
+spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{target_spreadsheet_id}/edit"
+print(f"✅ 작업이 완료되었습니다.")
+print(f"동명이인 {len(동명이인_이름들)}명 발견: {list(동명이인_이름들.keys())}")
+print(f"스프레드시트 URL: {spreadsheet_url}")

@@ -1,0 +1,31 @@
+# 가상환경 (각 플랫폼에서 별도로 생성)
+venv/
+env/
+ENV/
+.venv/
+
+# Python 캐시
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 환경 변수
+.env
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 임시 파일
+*.tmp
+*.bak
+*~
+

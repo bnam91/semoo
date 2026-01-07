@@ -1,3 +1,20 @@
+#!/usr/bin/env python3
+"""
+가상환경 자동 감지 및 활성화
+"""
+import sys
+import os
+from pathlib import Path
+
+# 현재 스크립트의 디렉토리
+SCRIPT_DIR = Path(__file__).parent.absolute()
+VENV_PYTHON = SCRIPT_DIR / 'venv' / 'bin' / 'python3'
+
+# 가상환경이 존재하고 현재 Python이 가상환경이 아닌 경우
+if VENV_PYTHON.exists() and 'venv' not in sys.executable:
+    # 가상환경의 Python으로 재실행
+    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON)] + sys.argv)
+
 import pandas as pd
 from googleapiclient.discovery import build
 import re
@@ -5,6 +22,7 @@ from auth import get_credentials
 from datetime import datetime
 import os
 from openpyxl import load_workbook
+from google_sheets_config import TRANSACTION_PREPROCESSING_FOLDER_ID
 
 def main():
     # 사용자로부터 년월 입력 받기 (예: 2504, 2512)
@@ -14,14 +32,15 @@ def main():
     # 구글 인증 자격 증명 가져오기
     creds = get_credentials()
     
-    # 구글 시트 API 클라이언트 생성
+    # 구글 시트 API 및 드라이브 API 클라이언트 생성
     sheets_service = build('sheets', 'v4', credentials=creds)
+    drive_service = build('drive', 'v3', credentials=creds)
     
-    # 스프레드시트 ID
-    SPREADSHEET_ID = '1CK2UXTy7HKjBe2T0ovm5hfzAAKZxZAR_ev3cbTPOMPs'
+    # 스프레드시트 ID (다운로드용)
+    DOWNLOAD_SPREADSHEET_ID = '1CK2UXTy7HKjBe2T0ovm5hfzAAKZxZAR_ev3cbTPOMPs'
     
     # 스프레드시트의 모든 시트 정보 가져오기
-    spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=DOWNLOAD_SPREADSHEET_ID).execute()
     sheets = spreadsheet.get('sheets', [])
     
     # 모든 시트의 필터링된 데이터를 저장할 리스트
@@ -44,7 +63,7 @@ def main():
         try:
             # 시트 데이터 가져오기
             result = sheets_service.spreadsheets().values().get(
-                spreadsheetId=SPREADSHEET_ID,
+                spreadsheetId=DOWNLOAD_SPREADSHEET_ID,
                 range=RANGE_NAME
             ).execute()
             
@@ -143,40 +162,192 @@ def main():
         selected_df = combined_df
         print('경고: 일부 필요한 열이 없어 모든 열을 유지합니다.')
     
-    # 결과를 엑셀 파일로 저장
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_file = f'(전처리)구글시트_{user_input}_{timestamp}.xlsx'
+    # 구글 드라이브에서 년월 폴더 찾기
+    print(f"\n'{user_input}' 폴더 찾는 중...")
+    query = f"'{TRANSACTION_PREPROCESSING_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and name='{user_input}' and trashed=false"
+    existing_folders = drive_service.files().list(q=query, fields='files(id, name)').execute()
     
-    # 인덱스 5(엑셀의 F열)를 문자열로 변환하여 숫자 형식이 아닌 텍스트로 저장되도록 함
-    if selected_df.shape[1] > 5:  # F열이 있는지 확인
-        selected_df.iloc[:, 5] = selected_df.iloc[:, 5].astype(str)
+    if not existing_folders.get('files'):
+        print(f"❌ '{user_input}' 폴더를 찾을 수 없습니다.")
+        return
     
-    # 하나의 시트에 모든 데이터 저장
-    selected_df.to_excel(output_file, sheet_name='25년3월데이터', index=False)
+    date_folder_id = existing_folders['files'][0]['id']
+    print(f"✅ '{user_input}' 폴더를 찾았습니다.")
     
-    # F열을 텍스트 형식으로 변환 (엑셀 파일 직접 수정)
-    try:
-        # 엑셀 파일 로드
-        wb = load_workbook(output_file)
-        ws = wb['25년3월데이터']
+    # 폴더 안에 스프레드시트가 있는지 확인
+    print(f"\n폴더 안에 스프레드시트 확인 중...")
+    spreadsheet_query = f"'{date_folder_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+    existing_spreadsheets = drive_service.files().list(q=spreadsheet_query, fields='files(id, name)').execute()
+    
+    if existing_spreadsheets.get('files'):
+        # 기존 스프레드시트가 있으면 첫 번째 것을 사용
+        target_spreadsheet_id = existing_spreadsheets['files'][0]['id']
+        target_spreadsheet_name = existing_spreadsheets['files'][0]['name']
+        print(f"✅ 기존 스프레드시트를 사용합니다: {target_spreadsheet_name}")
         
-        # F열 인덱스 (엑셀에서는 F열은 6번째 열)
-        f_col_idx = 6
+        # 기존 시트 목록 확인
+        spreadsheet_info = sheets_service.spreadsheets().get(spreadsheetId=target_spreadsheet_id).execute()
+        existing_sheet_names = {sheet.get('properties', {}).get('title', '') for sheet in spreadsheet_info.get('sheets', [])}
         
-        # 첫 번째 행은 헤더이므로 2번째 행부터 처리
-        for row in range(2, ws.max_row + 1):
-            cell = ws.cell(row=row, column=f_col_idx)
-            # 셀 형식을 텍스트로 설정
-            cell.number_format = '@'
+        # 새 시트명 생성 (타임스탬프 포함)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        new_sheet_name = f'전처리_구글시트_{timestamp}'
+        counter = 2
+        while new_sheet_name in existing_sheet_names:
+            new_sheet_name = f'전처리_구글시트_{timestamp}_{counter}'
+            counter += 1
         
-        # 변경사항 저장
-        wb.save(output_file)
-        print(f'F열을 텍스트 형식으로 저장했습니다.')
-    except Exception as e:
-        print(f'F열 텍스트 형식 변환 중 오류 발생: {e}')
+        # 새 시트 추가
+        add_sheet_request = {
+            'requests': [{
+                'addSheet': {
+                    'properties': {
+                        'title': new_sheet_name
+                    }
+                }
+            }]
+        }
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=target_spreadsheet_id,
+            body=add_sheet_request
+        ).execute()
+        print(f"✅ 새 시트 '{new_sheet_name}' 추가 완료")
+        
+        # 헤더 추가 (A열부터: 항목, 이름, 번호, ...)
+        header = ['항목', '이름', '번호', '-', '계좌', '주민번호', '입금액', '상태']
+        
+        # 데이터 업로드 (헤더 포함)
+        values = selected_df.fillna('').astype(str).values.tolist()
+        # 헤더를 첫 번째 행으로 추가
+        values_with_header = [header] + values
+        range_name = f"{new_sheet_name}!A1"
+        body = {'values': values_with_header}
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=target_spreadsheet_id,
+            range=range_name,
+            valueInputOption='USER_ENTERED',
+            body=body
+        ).execute()
+        
+        # F열 텍스트 형식 설정
+        spreadsheet_info = sheets_service.spreadsheets().get(spreadsheetId=target_spreadsheet_id).execute()
+        sheet_id = None
+        for sheet in spreadsheet_info.get('sheets', []):
+            if sheet.get('properties', {}).get('title') == new_sheet_name:
+                sheet_id = sheet.get('properties', {}).get('sheetId')
+                break
+        
+        if sheet_id is not None:
+            format_requests = [{
+                'repeatCell': {
+                    'range': {
+                        'sheetId': sheet_id,
+                        'startRowIndex': 1,  # 헤더 제외
+                        'endRowIndex': len(values) + 1,
+                        'startColumnIndex': 5,  # F열 (인덱스 5)
+                        'endColumnIndex': 6
+                    },
+                    'cell': {
+                        'userEnteredFormat': {
+                            'numberFormat': {
+                                'type': 'TEXT'
+                            }
+                        }
+                    },
+                    'fields': 'userEnteredFormat.numberFormat'
+                }
+            }]
+            
+            sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=target_spreadsheet_id,
+                body={'requests': format_requests}
+            ).execute()
+            print(f"✅ F열 텍스트 형식 설정 완료")
+        
+        spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{target_spreadsheet_id}/edit"
+        print(f"\n✅ 데이터가 '{new_sheet_name}' 시트에 업로드되었습니다.")
+        print(f"스프레드시트 URL: {spreadsheet_url}")
+    else:
+        # 스프레드시트가 없으면 새로 생성
+        print(f"새 스프레드시트 생성 중...")
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        spreadsheet_title = f'전처리_구글시트_{timestamp}'
+        
+        spreadsheet = {
+            'properties': {
+                'title': spreadsheet_title
+            }
+        }
+        
+        created_spreadsheet = sheets_service.spreadsheets().create(
+            body=spreadsheet,
+            fields='spreadsheetId,spreadsheetUrl'
+        ).execute()
+        
+        target_spreadsheet_id = created_spreadsheet.get('spreadsheetId')
+        spreadsheet_url = created_spreadsheet.get('spreadsheetUrl')
+        
+        print(f"✅ 스프레드시트 생성 완료: {spreadsheet_title}")
+        
+        # 생성된 스프레드시트를 날짜 폴더로 이동
+        file = drive_service.files().get(fileId=target_spreadsheet_id, fields='parents').execute()
+        previous_parents = ",".join(file.get('parents'))
+        
+        drive_service.files().update(
+            fileId=target_spreadsheet_id,
+            addParents=date_folder_id,
+            removeParents=previous_parents,
+            fields='id, parents'
+        ).execute()
+        
+        print(f"✅ 스프레드시트를 '{user_input}' 폴더로 이동 완료")
+        
+        # 헤더 추가 (A열부터: 항목, 이름, 번호, ...)
+        header = ['항목', '이름', '번호', '-', '계좌', '주민번호', '입금액', '상태']
+        
+        # 데이터 업로드 (헤더 포함)
+        values = selected_df.fillna('').astype(str).values.tolist()
+        # 헤더를 첫 번째 행으로 추가
+        values_with_header = [header] + values
+        range_name = "Sheet1!A1"
+        body = {'values': values_with_header}
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=target_spreadsheet_id,
+            range=range_name,
+            valueInputOption='USER_ENTERED',
+            body=body
+        ).execute()
+        
+        # F열 텍스트 형식 설정
+        format_requests = [{
+            'repeatCell': {
+                'range': {
+                    'sheetId': 0,  # Sheet1의 sheetId는 0
+                    'startRowIndex': 1,  # 헤더 제외 (헤더는 0번째 행)
+                    'endRowIndex': len(values) + 1,  # 헤더 포함한 전체 행 수
+                    'startColumnIndex': 5,  # F열 (인덱스 5)
+                    'endColumnIndex': 6
+                },
+                'cell': {
+                    'userEnteredFormat': {
+                        'numberFormat': {
+                            'type': 'TEXT'
+                        }
+                    }
+                },
+                'fields': 'userEnteredFormat.numberFormat'
+            }
+        }]
+        
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=target_spreadsheet_id,
+            body={'requests': format_requests}
+        ).execute()
+        print(f"✅ F열 텍스트 형식 설정 완료")
+        print(f"\n✅ 데이터가 '{spreadsheet_title}' 스프레드시트에 업로드되었습니다.")
+        print(f"스프레드시트 URL: {spreadsheet_url}")
     
-    print(f'데이터가 {output_file} 파일로 저장되었습니다.')
-    print(f'총 {total_items}개의 항목이 추출되었습니다.')
+    print(f'\n총 {total_items}개의 항목이 추출되었습니다.')
 
 if __name__ == '__main__':
     main()

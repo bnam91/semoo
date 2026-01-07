@@ -1,6 +1,27 @@
+#!/usr/bin/env python3
+"""
+가상환경 자동 감지 및 활성화
+"""
+import sys
+import os
 from pathlib import Path
+
+# 현재 스크립트의 디렉토리
+SCRIPT_DIR = Path(__file__).parent.absolute()
+VENV_PYTHON = SCRIPT_DIR / 'venv' / 'bin' / 'python3'
+
+# 가상환경이 존재하고 현재 Python이 가상환경이 아닌 경우
+if VENV_PYTHON.exists() and 'venv' not in sys.executable:
+    # 가상환경의 Python으로 재실행
+    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON)] + sys.argv)
+
 import pandas as pd
 from openpyxl import load_workbook
+from googleapiclient.discovery import build
+from auth import get_credentials
+from google_sheets_config import TRANSACTION_PREPROCESSING_FOLDER_ID
+from datetime import datetime
+import re
 
 # 현재 폴더 경로
 current_dir = Path('.')
@@ -27,9 +48,52 @@ if excel_files:
             selected_file = excel_files[choice - 1]
             print(f"\n선택된 파일: {selected_file}")
             
-            # 전처리 파일명 생성 (항상 .xlsx 확장자로 저장)
+            # 전처리 파일명 생성 (구글시트 시트명으로 사용)
             original_path = Path(selected_file)
-            copy_path = original_path.parent / f"{original_path.stem}_전처리.xlsx"
+            sheet_name = f"{original_path.stem}_전처리"
+            
+            # 파일명에서 날짜 추출 (예: 거래내역조회_20260106 -> 2026년 1월 6일)
+            # 그리고 전월 계산 (2026년 1월 -> 2025년 12월 -> 2512)
+            date_match = re.search(r'(\d{8})', original_path.stem)
+            if date_match:
+                date_str = date_match.group(1)  # 예: 20260106
+                file_year = int(date_str[:4])  # 2026
+                file_month = int(date_str[4:6])  # 01
+                
+                # 전월 계산
+                if file_month == 1:
+                    prev_month = 12
+                    prev_year = file_year - 1
+                else:
+                    prev_month = file_month - 1
+                    prev_year = file_year
+                
+                # 연월 형식으로 변환 (예: 2512)
+                folder_name = f"{str(prev_year)[2:]}{prev_month:02d}"
+                print(f"📅 파일 날짜: {file_year}년 {file_month}월")
+                print(f"📁 폴더명: {folder_name} ({prev_year}년 {prev_month}월)")
+            else:
+                # 날짜를 찾을 수 없으면 현재 날짜 기준으로 전월 계산
+                today = datetime.now()
+                if today.month == 1:
+                    prev_month = 12
+                    prev_year = today.year - 1
+                else:
+                    prev_month = today.month - 1
+                    prev_year = today.year
+                folder_name = f"{str(prev_year)[2:]}{prev_month:02d}"
+                print(f"⚠️  파일명에서 날짜를 찾을 수 없어 현재 날짜 기준으로 전월 계산: {folder_name}")
+            
+            # 구글 인증 자격 증명 가져오기
+            print("구글 인증 중...")
+            creds = get_credentials()
+            
+            # 구글 시트 API 및 드라이브 API 클라이언트 생성
+            sheets_service = build('sheets', 'v4', credentials=creds)
+            drive_service = build('drive', 'v3', credentials=creds)
+            
+            # 구글 드라이브 폴더 ID (config 파일에서 가져옴)
+            FOLDER_ID = TRANSACTION_PREPROCESSING_FOLDER_ID
             
             # 엑셀 파일 읽기
             print("엑셀 파일 읽는 중...")
@@ -150,41 +214,138 @@ if excel_files:
                 print(f"- 제외할 행: {len(df_excluded)}개")
                 print(f"- 유지할 행: {len(df_main)}개")
                 
-                # ExcelWriter를 사용하여 여러 시트에 저장
-                with pd.ExcelWriter(copy_path, engine='openpyxl') as writer:
-                    # 먼저 Sheet1과 Sheet2를 저장
-                    df_main.to_excel(writer, sheet_name='Sheet1', index=False, header=False)
-                    df_excluded.to_excel(writer, sheet_name='Sheet2', index=False, header=False)
+                # 구글 드라이브 폴더에 날짜 폴더 생성 및 새로운 스프레드시트 생성
+                print(f"\n구글 드라이브 폴더에 날짜 폴더 생성 중...")
                 
-                # 파일을 다시 열어서 Sheet0에 수식 추가
-                wb = load_workbook(copy_path)
+                # 날짜 폴더가 이미 존재하는지 확인
+                query = f"'{FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+                existing_folders = drive_service.files().list(q=query, fields='files(id, name)').execute()
                 
-                # Sheet0 생성
-                if 'Sheet0' in wb.sheetnames:
-                    ws0 = wb['Sheet0']
+                if existing_folders.get('files'):
+                    date_folder_id = existing_folders['files'][0]['id']
+                    print(f"✅ 날짜 폴더 '{folder_name}'가 이미 존재합니다.")
                 else:
-                    ws0 = wb.create_sheet('Sheet0', 0)  # 첫 번째 위치에 생성
+                    # 날짜 폴더 생성
+                    folder_metadata = {
+                        'name': folder_name,
+                        'mimeType': 'application/vnd.google-apps.folder',
+                        'parents': [FOLDER_ID]
+                    }
+                    date_folder = drive_service.files().create(
+                        body=folder_metadata,
+                        fields='id, name'
+                    ).execute()
+                    date_folder_id = date_folder.get('id')
+                    print(f"✅ 날짜 폴더 '{folder_name}' 생성 완료")
                 
-                # 헤더 작성
-                ws0['A1'] = '항목'
-                ws0['B1'] = '금액'
+                # 새로운 스프레드시트 생성
+                print(f"\n날짜 폴더에 새로운 스프레드시트 생성 중...")
+                spreadsheet_title = sheet_name
+                spreadsheet = {
+                    'properties': {
+                        'title': spreadsheet_title
+                    },
+                    'sheets': [
+                        {'properties': {'title': 'Sheet0'}},
+                        {'properties': {'title': 'Sheet1'}},
+                        {'properties': {'title': 'Sheet2'}}
+                    ]
+                }
                 
-                # 데이터 작성
-                ws0['A2'] = 'Sheet1 D열 합계'
-                ws0['A3'] = 'Sheet2 D열 합계'
-                ws0['A4'] = '총합'
+                created_spreadsheet = sheets_service.spreadsheets().create(
+                    body=spreadsheet,
+                    fields='spreadsheetId,spreadsheetUrl'
+                ).execute()
                 
-                # 수식 작성 (D열은 엑셀에서 4번째 열)
-                # Sheet1의 D2부터 D999까지 합계
-                ws0['B2'] = '=SUM(Sheet1!D2:D999)'
-                # Sheet2의 D2부터 D999까지 합계
-                ws0['B3'] = '=SUM(Sheet2!D2:D999)'
-                # 총합
-                ws0['B4'] = '=SUM(B2:B3)'
+                SPREADSHEET_ID = created_spreadsheet.get('spreadsheetId')
+                spreadsheet_url = created_spreadsheet.get('spreadsheetUrl')
                 
-                # 저장
-                wb.save(copy_path)
-                wb.close()
+                print(f"✅ 스프레드시트 생성 완료: {spreadsheet_title}")
+                print(f"   스프레드시트 ID: {SPREADSHEET_ID}")
+                
+                # 생성된 스프레드시트를 날짜 폴더로 이동
+                # 먼저 기존 부모(내 드라이브)를 가져옴
+                file = drive_service.files().get(fileId=SPREADSHEET_ID, fields='parents').execute()
+                previous_parents = ",".join(file.get('parents'))
+                
+                # 날짜 폴더로 이동 (기존 부모 제거하고 새 부모로 이동)
+                drive_service.files().update(
+                    fileId=SPREADSHEET_ID,
+                    addParents=date_folder_id,
+                    removeParents=previous_parents,
+                    fields='id, parents'
+                ).execute()
+                
+                print(f"✅ 스프레드시트를 '{folder_name}' 폴더로 이동 완료")
+                
+                # 시트 ID 매핑
+                spreadsheet_info = sheets_service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+                sheet_ids = {}
+                for sheet in spreadsheet_info.get('sheets', []):
+                    sheet_props = sheet.get('properties', {})
+                    sheet_title = sheet_props.get('title', '')
+                    sheet_id = sheet_props.get('sheetId')
+                    
+                    if sheet_title == 'Sheet0':
+                        sheet_ids['Sheet0'] = {'id': sheet_id, 'title': 'Sheet0'}
+                    elif sheet_title == 'Sheet1':
+                        sheet_ids['Sheet1'] = {'id': sheet_id, 'title': 'Sheet1'}
+                    elif sheet_title == 'Sheet2':
+                        sheet_ids['Sheet2'] = {'id': sheet_id, 'title': 'Sheet2'}
+                
+                print(f"✅ Sheet0, Sheet1, Sheet2 시트 준비 완료")
+                
+                # Sheet1에 데이터 업로드
+                sheet1_title = sheet_ids['Sheet1']['title']
+                if len(df_main) > 0:
+                    # 데이터프레임을 리스트로 변환
+                    values_main = df_main.fillna('').astype(str).values.tolist()
+                    range_main = f"{sheet1_title}!A1"
+                    body_main = {'values': values_main}
+                    sheets_service.spreadsheets().values().update(
+                        spreadsheetId=SPREADSHEET_ID,
+                        range=range_main,
+                        valueInputOption='USER_ENTERED',
+                        body=body_main
+                    ).execute()
+                    print(f"✅ {sheet1_title}에 {len(df_main)}행 데이터 업로드 완료")
+                
+                # Sheet2에 데이터 업로드
+                sheet2_title = sheet_ids['Sheet2']['title']
+                if len(df_excluded) > 0:
+                    values_excluded = df_excluded.fillna('').astype(str).values.tolist()
+                    range_excluded = f"{sheet2_title}!A1"
+                    body_excluded = {'values': values_excluded}
+                    sheets_service.spreadsheets().values().update(
+                        spreadsheetId=SPREADSHEET_ID,
+                        range=range_excluded,
+                        valueInputOption='USER_ENTERED',
+                        body=body_excluded
+                    ).execute()
+                    print(f"✅ {sheet2_title}에 {len(df_excluded)}행 데이터 업로드 완료")
+                
+                # Sheet0에 합계 정보 및 수식 작성
+                sheet0_title = sheet_ids['Sheet0']['title']
+                sheet1_title_for_formula = sheet_ids['Sheet1']['title']
+                sheet2_title_for_formula = sheet_ids['Sheet2']['title']
+                
+                # Sheet0 데이터 준비
+                sheet0_values = [
+                    ['항목', '금액'],
+                    ['Sheet1 D열 합계', f'=SUM({sheet1_title_for_formula}!D2:D999)'],
+                    ['Sheet2 D열 합계', f'=SUM({sheet2_title_for_formula}!D2:D999)'],
+                    ['총합', '=SUM(B2:B3)']
+                ]
+                
+                range_sheet0 = f"{sheet0_title}!A1"
+                body_sheet0 = {'values': sheet0_values}
+                sheets_service.spreadsheets().values().update(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range=range_sheet0,
+                    valueInputOption='USER_ENTERED',
+                    body=body_sheet0
+                ).execute()
+                print(f"✅ {sheet0_title}에 합계 정보 업로드 완료")
                 
                 # 콘솔에 출력할 합계 계산 (참고용)
                 sheet1_sum = 0
@@ -207,14 +368,85 @@ if excel_files:
                 print(f"- 총합: {total_sum:,.0f}")
                 print("(Sheet0에는 수식으로 저장되었습니다)")
                 
-                print(f"\n처리 완료! 전처리 파일이 저장되었습니다: {copy_path}")
-                print(f"- Sheet0: 합계 정보")
-                print(f"- Sheet1: {len(df_main)}행 (일반 데이터)")
-                print(f"- Sheet2: {len(df_excluded)}행 (제외된 데이터)")
+                print(f"\n처리 완료! 구글 드라이브 폴더에 스프레드시트가 생성되었습니다.")
+                print(f"스프레드시트 URL: {spreadsheet_url}")
+                print(f"- {sheet_ids['Sheet0']['title']}: 합계 정보")
+                print(f"- {sheet_ids['Sheet1']['title']}: {len(df_main)}행 (일반 데이터)")
+                print(f"- {sheet_ids['Sheet2']['title']}: {len(df_excluded)}행 (제외된 데이터)")
             else:
-                # C열이 없는 경우 기존 방식으로 저장
-                df.to_excel(copy_path, index=False, header=False)
-                print(f"\n처리 완료! 전처리 파일이 저장되었습니다: {copy_path}")
+                # C열이 없는 경우 구글 드라이브 폴더에 날짜 폴더 생성 및 새로운 스프레드시트 생성
+                print(f"\n구글 드라이브 폴더에 날짜 폴더 생성 중...")
+                
+                # 날짜 폴더가 이미 존재하는지 확인
+                query = f"'{FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+                existing_folders = drive_service.files().list(q=query, fields='files(id, name)').execute()
+                
+                if existing_folders.get('files'):
+                    date_folder_id = existing_folders['files'][0]['id']
+                    print(f"✅ 날짜 폴더 '{folder_name}'가 이미 존재합니다.")
+                else:
+                    # 날짜 폴더 생성
+                    folder_metadata = {
+                        'name': folder_name,
+                        'mimeType': 'application/vnd.google-apps.folder',
+                        'parents': [FOLDER_ID]
+                    }
+                    date_folder = drive_service.files().create(
+                        body=folder_metadata,
+                        fields='id, name'
+                    ).execute()
+                    date_folder_id = date_folder.get('id')
+                    print(f"✅ 날짜 폴더 '{folder_name}' 생성 완료")
+                
+                # 새로운 스프레드시트 생성
+                print(f"\n날짜 폴더에 새로운 스프레드시트 생성 중...")
+                spreadsheet_title = sheet_name
+                spreadsheet = {
+                    'properties': {
+                        'title': spreadsheet_title
+                    }
+                }
+                
+                created_spreadsheet = sheets_service.spreadsheets().create(
+                    body=spreadsheet,
+                    fields='spreadsheetId,spreadsheetUrl'
+                ).execute()
+                
+                SPREADSHEET_ID = created_spreadsheet.get('spreadsheetId')
+                spreadsheet_url = created_spreadsheet.get('spreadsheetUrl')
+                
+                print(f"✅ 스프레드시트 생성 완료: {spreadsheet_title}")
+                print(f"   스프레드시트 ID: {SPREADSHEET_ID}")
+                
+                # 생성된 스프레드시트를 날짜 폴더로 이동
+                # 먼저 기존 부모(내 드라이브)를 가져옴
+                file = drive_service.files().get(fileId=SPREADSHEET_ID, fields='parents').execute()
+                previous_parents = ",".join(file.get('parents'))
+                
+                # 날짜 폴더로 이동
+                drive_service.files().update(
+                    fileId=SPREADSHEET_ID,
+                    addParents=date_folder_id,
+                    removeParents=previous_parents,
+                    fields='id, parents'
+                ).execute()
+                
+                print(f"✅ 스프레드시트를 '{folder_name}' 폴더로 이동 완료")
+                
+                # 데이터 업로드
+                values = df.fillna('').astype(str).values.tolist()
+                range_name = "Sheet1!A1"
+                body = {'values': values}
+                sheets_service.spreadsheets().values().update(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range=range_name,
+                    valueInputOption='USER_ENTERED',
+                    body=body
+                ).execute()
+                print(f"✅ Sheet1에 {len(df)}행 데이터 업로드 완료")
+                
+                print(f"\n처리 완료! 구글 드라이브 폴더에 스프레드시트가 생성되었습니다.")
+                print(f"스프레드시트 URL: {spreadsheet_url}")
                 print("(C열이 없어 키워드 검사를 수행하지 않았습니다)")
                 print(f"\n원본 파일 D7:D999 합계: {original_d_sum:,.0f}")
         else:

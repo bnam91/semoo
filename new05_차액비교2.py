@@ -1,3 +1,20 @@
+#!/usr/bin/env python3
+"""
+가상환경 자동 감지 및 활성화
+"""
+import sys
+import os
+from pathlib import Path
+
+# 현재 스크립트의 디렉토리
+SCRIPT_DIR = Path(__file__).parent.absolute()
+VENV_PYTHON = SCRIPT_DIR / 'venv' / 'bin' / 'python3'
+
+# 가상환경이 존재하고 현재 Python이 가상환경이 아닌 경우
+if VENV_PYTHON.exists() and 'venv' not in sys.executable:
+    # 가상환경의 Python으로 재실행
+    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON)] + sys.argv)
+
 import pandas as pd
 import numpy as np
 import os
