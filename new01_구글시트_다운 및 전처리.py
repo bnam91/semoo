@@ -55,6 +55,10 @@ def main():
         if '(가라)' in sheet_title:
             continue
         
+        # '완료_'가 포함된 시트는 건너뛰기
+        if '완료_' in sheet_title:
+            continue
+        
         print(f'{sheet_title} 시트 처리 중...')
         
         # 시트 데이터 범위 설정 (9행부터 모든 데이터)

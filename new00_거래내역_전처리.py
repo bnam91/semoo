@@ -22,15 +22,21 @@ from auth import get_credentials
 from google_sheets_config import TRANSACTION_PREPROCESSING_FOLDER_ID
 from datetime import datetime
 import re
+import unicodedata
 
 # 현재 폴더 경로
 current_dir = Path('.')
 
 # '거래내역조회_'가 포함된 엑셀 파일 찾기 (현재 폴더에만)
+# 파일명 정규화를 위해 NFC로 변환하여 비교
 excel_files = []
-for file_path in current_dir.glob('*거래내역조회_*.xls*'):
-    if file_path.is_file():  # 파일인지 확인
-        excel_files.append(file_path)
+search_pattern_nfc = unicodedata.normalize('NFC', '거래내역조회_')
+for file_path in current_dir.iterdir():
+    if file_path.is_file() and file_path.suffix.lower() in ['.xls', '.xlsx']:
+        # 파일명을 NFC로 정규화하여 비교
+        normalized_name = unicodedata.normalize('NFC', file_path.name)
+        if search_pattern_nfc in normalized_name:
+            excel_files.append(file_path)
 
 # 파일명 기준으로 정렬
 excel_files.sort()
@@ -155,7 +161,7 @@ if excel_files:
                 '무신사', '쿠팡', '당근',
                 # 기타
                 '월세', '배송비', '29고6425', '대출', '대체', '지로',
-                '고용보험', '카카오T', '이자'
+                '고용보험', '카카오T', '이자', '스마트스토어정산'
             ]
             
             # 디버깅: 키워드 리스트 확인
@@ -370,6 +376,7 @@ if excel_files:
                 print("(Sheet0에는 수식으로 저장되었습니다)")
                 
                 print(f"\n처리 완료! 구글 드라이브 폴더에 스프레드시트가 생성되었습니다.")
+                print(f"📁 구글 드라이브 폴더: {folder_name} ({prev_year}년 {prev_month}월)")
                 print(f"스프레드시트 URL: {spreadsheet_url}")
                 print(f"- {sheet_ids['Sheet0']['title']}: 합계 정보")
                 print(f"- {sheet_ids['Sheet1']['title']}: {len(df_main)}행 (일반 데이터)")
@@ -447,6 +454,7 @@ if excel_files:
                 print(f"✅ Sheet1에 {len(df)}행 데이터 업로드 완료")
                 
                 print(f"\n처리 완료! 구글 드라이브 폴더에 스프레드시트가 생성되었습니다.")
+                print(f"📁 구글 드라이브 폴더: {folder_name} ({prev_year}년 {prev_month}월)")
                 print(f"스프레드시트 URL: {spreadsheet_url}")
                 print("(C열이 없어 키워드 검사를 수행하지 않았습니다)")
                 print(f"\n원본 파일 D7:D999 합계: {original_d_sum:,.0f}")
